@@ -1,0 +1,269 @@
+"""
+=============================================================
+  DecodeLabs | AI Industrial Training – Project 3
+  AI Recomendation Logic (Content-Based Filtering)
+  Batch 2026
+=============================================================
+
+WHAT THIS SCRIPT DOES
+---------------------
+Accepts ≥ 3 user skills, builds a TF-IDF vector for the user
+profile, computes Cosine Similarity against every job role in
+raw_skills.csv, and returns the Top-3 best-fit career paths.
+
+PIPELINE  (Input-Process-Output)
+---------------------------------
+Step 1  – Ingestion  : read user skills
+Step 2  – Scoring    : TF-IDF vectorise → cosine similarity
+Step 3  – Sorting    : descending by score
+Step 4  – Filtering  : keep Top-N results only
+
+HOW TO RUN
+----------
+  python AI-Recommendation-Logic.py
+  # OR pass skills directly:
+  python AI-Recommendation-Logic.py --skills "Python" "SQL" "Machine Learning"
+
+DATASET FORMAT  (raw_skills.csv)
+---------------------------------
+  Role,Skills
+  Data Scientist,"Python, SQL, Machine Learning, Data Analysis, Statistics"
+  DevOps Engineer,"AWS, Docker, Kubernetes, CI/CD, Git, Linux"
+  ...
+"""
+
+import csv
+import math
+import argparse
+import os
+import sys
+from collections import Counter
+
+
+# ---------------------------------------------------------------------------
+# DATASET  – embedded fallback so the script runs without a CSV file
+# ---------------------------------------------------------------------------
+EMBEDDED_DATASET = [
+    {"Role": "Data Scientist",         "Skills": "Python, SQL, Machine Learning, Data Analysis, Statistics, NumPy, Pandas"},
+    {"Role": "DevOps Engineer",        "Skills": "AWS, Docker, Kubernetes, CI/CD, Git, Linux, Automation, Shell Scripting"},
+    {"Role": "Backend Developer",      "Skills": "Python, Java, SQL, APIs, Node.js, REST, Microservices, Git"},
+    {"Role": "Frontend Developer",     "Skills": "HTML, CSS, JavaScript, React, UI/UX, TypeScript, Git, Responsive Design"},
+    {"Role": "Machine Learning Engineer", "Skills": "Python, TensorFlow, PyTorch, Deep Learning, Neural Networks, Data Analysis, Git"},
+    {"Role": "Cloud Architect",        "Skills": "AWS, Azure, Cloud, Kubernetes, Docker, Networking, Security, Terraform"},
+    {"Role": "Data Analyst",           "Skills": "SQL, Excel, Python, Tableau, Power BI, Data Visualisation, Statistics"},
+    {"Role": "Cybersecurity Analyst",  "Skills": "Networking, Security, Linux, Python, Penetration Testing, Cryptography, Firewalls"},
+    {"Role": "Full Stack Developer",   "Skills": "JavaScript, React, Node.js, SQL, REST, Git, HTML, CSS, Python"},
+    {"Role": "System Administrator",   "Skills": "Linux, Windows Server, Networking, Shell Scripting, Automation, Git, Monitoring"},
+    {"Role": "AI Engineer",            "Skills": "Python, Machine Learning, Deep Learning, TensorFlow, NLP, Computer Vision, APIs"},
+    {"Role": "Database Administrator", "Skills": "SQL, MySQL, PostgreSQL, MongoDB, Database Design, Performance Tuning, Backup"},
+]
+
+
+# ---------------------------------------------------------------------------
+# STEP 0 – Load dataset
+# ---------------------------------------------------------------------------
+def load_dataset(filepath: str) -> list[dict]:
+    """Load job-role skill data from CSV or fall back to embedded dataset."""
+    if filepath and os.path.isfile(filepath):
+        data = []
+        with open(filepath, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                data.append({"Role": row["Role"].strip(), "Skills": row["Skills"].strip()})
+        print(f"[✓] Loaded {len(data)} roles from '{filepath}'")
+        return data
+    else:
+        print("[i] raw_skills.csv not found – using embedded dataset.\n")
+        return EMBEDDED_DATASET
+
+
+# ---------------------------------------------------------------------------
+# STEP 1 – Ingestion: parse + normalise skills
+# ---------------------------------------------------------------------------
+def parse_skills(raw: str | list) -> list[str]:
+    """
+    Accept a comma-separated string OR a list, return a clean list of
+    lowercase, stripped skill tokens.
+    """
+    if isinstance(raw, list):
+        tokens = raw
+    else:
+        tokens = raw.split(",")
+    return [t.strip().lower() for t in tokens if t.strip()]
+
+
+def get_user_skills() -> list[str]:
+    """Prompt the user interactively for at least 3 skills."""
+    print("=" * 60)
+    print("  DecodeLabs | Tech Stack Recommender")
+    print("=" * 60)
+    print("\nEnter your skills (minimum 3, separated by commas).")
+    print("Example:  Python, Machine Learning, SQL\n")
+
+    while True:
+        raw = input("Your skills: ")
+        skills = parse_skills(raw)
+        if len(skills) >= 3:
+            return skills
+        print(f"  [!] You entered {len(skills)} skill(s). Please enter at least 3.\n")
+
+
+# ---------------------------------------------------------------------------
+# STEP 2 – TF-IDF vectorisation
+# ---------------------------------------------------------------------------
+def build_vocabulary(all_skill_lists: list[list[str]]) -> list[str]:
+    """Return a sorted list of every unique skill term across all documents."""
+    vocab = set()
+    for skills in all_skill_lists:
+        vocab.update(skills)
+    return sorted(vocab)
+
+
+def compute_tf(skill_list: list[str]) -> dict[str, float]:
+    """Term Frequency = count(term) / total_terms."""
+    counts = Counter(skill_list)
+    total = len(skill_list) if skill_list else 1
+    return {term: count / total for term, count in counts.items()}
+
+
+def compute_idf(all_skill_lists: list[list[str]], vocab: list[str]) -> dict[str, float]:
+    """
+    Inverse Document Frequency = log(N / df(term))
+    Penalises terms that appear in many documents (too generic).
+    """
+    N = len(all_skill_lists)
+    idf = {}
+    for term in vocab:
+        df = sum(1 for doc in all_skill_lists if term in doc)
+        idf[term] = math.log(N / df) if df else 0.0
+    return idf
+
+
+def build_tfidf_vector(skill_list: list[str], vocab: list[str], idf: dict[str, float]) -> list[float]:
+    """Return a TF-IDF weighted vector aligned to vocab."""
+    tf = compute_tf(skill_list)
+    return [tf.get(term, 0.0) * idf.get(term, 0.0) for term in vocab]
+
+
+# ---------------------------------------------------------------------------
+# STEP 2 – Cosine Similarity
+# ---------------------------------------------------------------------------
+def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    """
+    cos(θ) = (A · B) / (||A|| × ||B||)
+
+    Returns a score in [0, 1] (since TF-IDF values are non-negative).
+    1 = perfect match | 0 = no common features.
+    """
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    mag_a = math.sqrt(sum(a ** 2 for a in vec_a))
+    mag_b = math.sqrt(sum(b ** 2 for b in vec_b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0                # Cold-start guard
+    return dot / (mag_a * mag_b)
+
+
+# ---------------------------------------------------------------------------
+# STEPS 3 & 4 – Scoring, Sorting, Filtering
+# ---------------------------------------------------------------------------
+def recommend(user_skills: list[str], dataset: list[dict], top_n: int = 3) -> list[dict]:
+    """
+    Full 4-step pipeline:
+      1. Ingest     – normalise all skill lists
+      2. Vectorise  – build shared vocab → TF-IDF vectors
+      3. Score      – cosine similarity per role
+      4. Sort+Filter – return Top-N results
+    """
+    # --- 1. Normalise --------------------------------------------------
+    role_skill_lists = [parse_skills(row["Skills"]) for row in dataset]
+    user_skill_list  = [s.lower() for s in user_skills]
+
+    # Combined corpus for IDF calculation (includes user profile)
+    all_docs = role_skill_lists + [user_skill_list]
+    vocab    = build_vocabulary(all_docs)
+    idf      = compute_idf(all_docs, vocab)
+
+    # --- 2. Vectorise --------------------------------------------------
+    user_vec = build_tfidf_vector(user_skill_list, vocab, idf)
+
+    # --- 3. Score ------------------------------------------------------
+    scored = []
+    for i, row in enumerate(dataset):
+        role_vec = build_tfidf_vector(role_skill_lists[i], vocab, idf)
+        score    = cosine_similarity(user_vec, role_vec)
+        scored.append({"Role": row["Role"], "Score": score,
+                       "Skills": row["Skills"]})
+
+    # --- 4. Sort & Filter ----------------------------------------------
+    scored.sort(key=lambda x: x["Score"], reverse=True)
+    return scored[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# OUTPUT
+# ---------------------------------------------------------------------------
+def display_results(results: list[dict], user_skills: list[str]) -> None:
+    """Pretty-print the recommendation results."""
+    print("\n" + "=" * 60)
+    print("  TOP RECOMMENDATIONS")
+    print("=" * 60)
+    print(f"  Based on your skills: {', '.join(user_skills)}\n")
+
+    for rank, result in enumerate(results, start=1):
+        score_pct = result["Score"] * 100
+        bar       = "█" * int(score_pct / 5)          # visual bar (max 20 chars)
+        print(f"  #{rank}  {result['Role']}")
+        print(f"       Match  : {score_pct:.1f}%  {bar}")
+        print(f"       Skills : {result['Skills']}")
+        print()
+
+    if not results or results[0]["Score"] == 0.0:
+        print("  [!] Cold-Start detected: no matching skills found.")
+        print("      Try entering more specific skill names.\n")
+
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="DecodeLabs – AI Project 3: Tech Stack Recommender"
+    )
+    parser.add_argument(
+        "--skills", nargs="+",
+        help='Your skills (e.g. --skills "Python" "SQL" "Machine Learning")'
+    )
+    parser.add_argument(
+        "--csv", default="raw_skills.csv",
+        help="Path to raw_skills.csv dataset (default: raw_skills.csv)"
+    )
+    parser.add_argument(
+        "--top", type=int, default=3,
+        help="Number of recommendations to display (default: 3)"
+    )
+    args = parser.parse_args()
+
+    # Load dataset
+    dataset = load_dataset(args.csv)
+
+    # Get user skills
+    if args.skills:
+        user_skills = [s.strip() for s in args.skills]
+        if len(user_skills) < 3:
+            print("[!] Please provide at least 3 skills.")
+            sys.exit(1)
+        print(f"[✓] Skills received: {', '.join(user_skills)}")
+    else:
+        user_skills = get_user_skills()
+
+    # Run recommendation pipeline
+    results = recommend(user_skills, dataset, top_n=args.top)
+
+    # Show results
+    display_results(results, user_skills)
+
+
+if __name__ == "__main__":
+    main()
